@@ -6,7 +6,24 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
   try {
-    const { cartItems, cartTotal, catalog } = req.body;
+    // Vercel doesn't auto-parse JSON bodies — read and parse manually
+    let body = req.body;
+    if (!body || typeof body === 'string') {
+      const raw = await new Promise((resolve, reject) => {
+        let data = '';
+        req.on('data', chunk => data += chunk);
+        req.on('end', () => resolve(data));
+        req.on('error', reject);
+      });
+      try { body = JSON.parse(raw); } catch { return res.status(400).json({ error: 'invalid_json' }); }
+    }
+
+    const { cartItems, cartTotal, catalog } = body;
+
+    if (!cartItems?.length || !catalog?.length) {
+      return res.status(400).json({ error: 'missing_fields' });
+    }
+
     const gap = Math.max(0, 80 - cartTotal);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -17,7 +34,7 @@ export default async function handler(req, res) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-haiku-4-5-20251001', // faster + cheaper for upsell calls
         max_tokens: 600,
         system: `You are a cart upsell engine. Analyze the cart and pick ONE strategy:
 - "complementary": missing accessories
@@ -43,13 +60,12 @@ Respond ONLY in raw JSON, no markdown:
 
     const data = await response.json();
 
-    // Check for Anthropic API errors
     if (data.error) {
+      console.error('Anthropic error:', data.error);
       return res.status(500).json({ error: data.error.message });
     }
 
     const text = data.content?.[0]?.text || '{}';
-
     let upsell;
     try {
       upsell = JSON.parse(text);
@@ -59,7 +75,6 @@ Respond ONLY in raw JSON, no markdown:
       upsell = JSON.parse(match[0]);
     }
 
-    // Safety net: restore variant_ids Claude may have dropped
     if (Array.isArray(upsell.suggestions)) {
       upsell.suggestions = upsell.suggestions
         .map(s => {
@@ -75,6 +90,7 @@ Respond ONLY in raw JSON, no markdown:
     return res.status(200).json(upsell);
 
   } catch (err) {
+    console.error('cart-upsell handler error:', err);
     return res.status(500).json({ error: err.message });
   }
 }
